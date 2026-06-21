@@ -345,8 +345,10 @@ socket.on('vc-joined', async ({ vcName, users }) => {
     const targetSocketId = peerInfo.socketId;
     const remoteUser = peerInfo.user;
     
-    // Establish connection as the offer initiator
-    await makePeerConnection(targetSocketId, remoteUser, true);
+    // Establish connection as the offer initiator (if not already established)
+    if (!peers[targetSocketId]) {
+      await makePeerConnection(targetSocketId, remoteUser, true);
+    }
   }
   
   // Share media status
@@ -357,8 +359,10 @@ socket.on('vc-joined', async ({ vcName, users }) => {
 socket.on('user-joined-vc', async ({ socketId, user }) => {
   console.log(`Peer joined VC: ${user.username} (${socketId})`);
   
-  // Wait to receive offer from them (they are the initiator)
-  await makePeerConnection(socketId, user, false);
+  // Create peer connection (if not already established by an incoming offer)
+  if (!peers[socketId]) {
+    await makePeerConnection(socketId, user, false);
+  }
 });
 
 // Peer left VC
@@ -367,8 +371,13 @@ socket.on('user-left-vc', ({ socketId, username }) => {
   closePeerConnection(socketId);
 });
 
-// WebRTC WebRTC peer connection maker
+// WebRTC peer connection maker
 async function makePeerConnection(targetSocketId, remoteUser, isInitiator) {
+  if (peers[targetSocketId]) {
+    console.warn(`RTCPeerConnection to ${targetSocketId} already exists. Skipping recreation.`);
+    return peers[targetSocketId];
+  }
+
   const pc = new RTCPeerConnection(rtcConfig);
   peers[targetSocketId] = pc;
   
@@ -410,12 +419,18 @@ async function makePeerConnection(targetSocketId, remoteUser, isInitiator) {
       console.error('Failed to create local WebRTC offer:', err);
     }
   }
+
+  return pc;
 }
 
 // Receive offer from peer
-socket.on('webrtc-offer', async ({ senderSocketId, offer }) => {
-  const pc = peers[senderSocketId];
-  if (!pc) return;
+socket.on('webrtc-offer', async ({ senderSocketId, senderUser, offer }) => {
+  let pc = peers[senderSocketId];
+  if (!pc) {
+    console.log(`Offer received from unknown peer ${senderUser.username}. Initializing connection.`);
+    await makePeerConnection(senderSocketId, senderUser, false);
+    pc = peers[senderSocketId];
+  }
   
   try {
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -435,7 +450,11 @@ socket.on('webrtc-offer', async ({ senderSocketId, offer }) => {
 socket.on('webrtc-answer', async ({ senderSocketId, answer }) => {
   const pc = peers[senderSocketId];
   if (pc) {
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    } catch (err) {
+      console.error('Failed to set remote answer description:', err);
+    }
   }
 });
 
@@ -498,37 +517,43 @@ function addLocalVideoCard() {
 }
 
 function addRemoteVideoCard(socketId, remoteUser, remoteStream) {
-  // Remove if already exists to prevent duplicate UI elements
-  const existing = document.getElementById(`video-card-${socketId}`);
-  if (existing) existing.remove();
+  let card = document.getElementById(`video-card-${socketId}`);
   
-  const initial = remoteUser.username.charAt(0).toUpperCase();
-  const html = `
-    <div class="video-card remote-video" id="video-card-${socketId}">
-      <div class="video-placeholder" id="placeholder-${socketId}">
-        <div class="video-avatar-pulse" style="background-color: ${remoteUser.color}">${initial}</div>
-      </div>
-      <video id="video-${socketId}" autoplay playsinline></video>
-      <div class="video-tag">
-        <span class="video-username">${remoteUser.username}</span>
-        <div class="video-tag-status">
-          <svg class="icon-mic-muted-badge ${remoteUser.micActive ? 'hidden' : ''}" id="badge-mute-${socketId}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ed4245" stroke-width="2.5"><line x1="2" y1="2" x2="22" y2="22"></line><path d="M18.89 13.23A7.12 7.12 0 0 1 12 17a7.12 7.12 0 0 1-6.89-3.77"></path><path d="M9 9h0a3 3 0 0 0 3 3"></path><path d="M10.07 4.39A3 3 0 0 1 12 4a3 3 0 0 1 3 3v3.58"></path></svg>
+  // If card doesn't exist, create it once
+  if (!card) {
+    const initial = remoteUser.username.charAt(0).toUpperCase();
+    const html = `
+      <div class="video-card remote-video" id="video-card-${socketId}">
+        <div class="video-placeholder" id="placeholder-${socketId}">
+          <div class="video-avatar-pulse" style="background-color: ${remoteUser.color}">${initial}</div>
+        </div>
+        <video id="video-${socketId}" autoplay playsinline></video>
+        <div class="video-tag">
+          <span class="video-username">${remoteUser.username}</span>
+          <div class="video-tag-status">
+            <svg class="icon-mic-muted-badge ${remoteUser.micActive ? 'hidden' : ''}" id="badge-mute-${socketId}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ed4245" stroke-width="2.5"><line x1="2" y1="2" x2="22" y2="22"></line><path d="M18.89 13.23A7.12 7.12 0 0 1 12 17a7.12 7.12 0 0 1-6.89-3.77"></path><path d="M9 9h0a3 3 0 0 0 3 3"></path><path d="M10.07 4.39A3 3 0 0 1 12 4a3 3 0 0 1 3 3v3.58"></path></svg>
+          </div>
         </div>
       </div>
-    </div>
-  `;
+    `;
+    dom.videoGrid.insertAdjacentHTML('beforeend', html);
+    card = document.getElementById(`video-card-${socketId}`);
+  }
   
-  dom.videoGrid.insertAdjacentHTML('beforeend', html);
-  
+  // Bind stream if not already bound
   const videoEl = document.getElementById(`video-${socketId}`);
-  videoEl.srcObject = remoteStream;
+  if (videoEl && videoEl.srcObject !== remoteStream) {
+    videoEl.srcObject = remoteStream;
+  }
   
-  // Set initial placeholders based on remote state
+  // Set placeholders based on remote state
   const placeholder = document.getElementById(`placeholder-${socketId}`);
-  if (remoteUser.camActive) {
-    placeholder.classList.add('hidden');
-  } else {
-    placeholder.classList.remove('hidden');
+  if (placeholder) {
+    if (remoteUser.camActive) {
+      placeholder.classList.add('hidden');
+    } else {
+      placeholder.classList.remove('hidden');
+    }
   }
 }
 
