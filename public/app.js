@@ -281,6 +281,9 @@ async function joinVoiceChannel(vcName) {
 }
 
 async function acquireMedia() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('WebRTC requires a secure context (HTTPS or localhost). Camera and microphone access are blocked by your browser on non-secure connections.');
+  }
   const constraints = {
     audio: true,
     video: true
