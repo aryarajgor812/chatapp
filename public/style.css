@@ -1271,3 +1271,72 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==========================================================================
+   8. PRIVATE MESSAGING (DM) & MEDIA ATTACHMENTS
+   ========================================================================== */
+
+.member-item {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.member-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.member-item.active {
+  background: rgba(0, 242, 254, 0.1);
+  border-left: 3px solid var(--accent-cyan);
+  padding-left: 5px;
+}
+
+.member-item.unread .member-name::after {
+  content: ' •';
+  color: var(--accent-cyan);
+  font-weight: bold;
+  animation: pulseCyan 1.5s infinite;
+}
+
+.action-file-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s ease;
+}
+
+.action-file-btn:hover {
+  color: var(--accent-cyan);
+}
+
+.chat-shared-image {
+  max-width: 300px;
+  max-height: 250px;
+  border-radius: 12px;
+  margin-top: 8px;
+  border: 1px solid var(--border-light);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  transition: transform 0.2s ease;
+}
+
+.chat-shared-image:hover {
+  transform: scale(1.02);
+  cursor: zoom-in;
+}
+
+.chat-shared-audio {
+  margin-top: 8px;
+  display: block;
+  outline: none;
+  max-width: 280px;
+}
+
+@keyframes pulseCyan {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}

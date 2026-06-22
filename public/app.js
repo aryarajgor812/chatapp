@@ -12,6 +12,16 @@ let localStream = null;
 let micActive = true;
 let camActive = false;
 
+// Screen Share State
+let screenStream = null;
+let screenActive = false;
+
+// Private Chat State
+let activeChatType = 'channel'; // 'channel' or 'dm'
+let activeChatTarget = 'general'; // channelId or recipientSocketId
+const privateChats = {}; // socketId -> messageArray
+const channelChats = {}; // channelId -> messageArray
+
 // Peer Connections Map: socketId -> RTCPeerConnection
 const peers = {};
 
@@ -46,11 +56,16 @@ const dom = {
   userFooterName: document.getElementById('user-footer-name'),
   btnToggleMic: document.getElementById('btn-toggle-mic'),
   btnToggleCam: document.getElementById('btn-toggle-cam'),
+  btnToggleScreen: document.getElementById('btn-toggle-screen'),
   btnLeaveVc: document.getElementById('btn-leave-vc'),
   
   btnLargeMic: document.getElementById('btn-large-mic'),
   btnLargeCam: document.getElementById('btn-large-cam'),
+  btnLargeScreen: document.getElementById('btn-large-screen'),
   btnLargeLeave: document.getElementById('btn-large-leave'),
+  
+  fileInput: document.getElementById('file-input'),
+  fileTrigger: document.getElementById('file-trigger'),
   
   videoWorkspace: document.getElementById('video-workspace'),
   videoGrid: document.getElementById('video-grid'),
@@ -147,7 +162,9 @@ dom.channelItems.forEach(item => {
 });
 
 function switchTextChannel(channelId) {
-  if (currentTC === channelId) return;
+  activeChatType = 'channel';
+  activeChatTarget = channelId;
+  currentTC = channelId;
   
   // UI active class swap
   document.querySelectorAll('.channel-item[data-type="text"]').forEach(el => {
@@ -158,38 +175,96 @@ function switchTextChannel(channelId) {
     }
   });
   
+  // Remove highlights from DMs
+  document.querySelectorAll('.member-item').forEach(el => el.classList.remove('active'));
+  
   // Update headers
   const meta = channelMetadata[channelId] || { name: channelId, desc: '' };
-  currentTC = channelId;
   
   dom.activeChannelName.textContent = meta.name;
   dom.activeChannelDesc.textContent = meta.desc;
   dom.welcomeChannelName.textContent = meta.name;
   dom.welcomeChannelDescSpan.textContent = meta.desc;
   
-  // Clear feed and input
+  // Clear feed and load history
   dom.messageFeed.innerHTML = '';
   dom.messageInput.placeholder = `Message #${meta.name}...`;
+  
+  const history = channelChats[channelId] || [];
+  history.forEach(msg => {
+    appendMessage(msg);
+  });
   
   // Emit text channel join request
   socket.emit('join-text-channel', channelId);
 }
 
-// Send Text Message
+// Send Text Message (or Private Message)
 dom.messageForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = dom.messageInput.value.trim();
   if (!text) return;
   
-  socket.emit('send-message', { text, channel: currentTC });
+  if (activeChatType === 'dm') {
+    sendPrivateMessage(text, 'text');
+  } else {
+    socket.emit('send-message', { text, channel: currentTC, type: 'text' });
+  }
   dom.messageInput.value = '';
 });
 
+function sendPrivateMessage(text, type) {
+  const messageData = {
+    id: `${localUserId}-${Date.now()}`,
+    senderId: localUserId,
+    senderName: username,
+    senderColor: userColor,
+    text: text,
+    type: type,
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  };
+  
+  privateChats[activeChatTarget] = privateChats[activeChatTarget] || [];
+  privateChats[activeChatTarget].push(messageData);
+  
+  appendMessage(messageData);
+  socket.emit('send-private-message', { recipientId: activeChatTarget, text: text, type: type });
+}
+
 // Receive Text Message
 socket.on('receive-message', ({ channel, message }) => {
-  if (channel !== currentTC) return; // Ignore if user isn't in this channel
+  channelChats[channel] = channelChats[channel] || [];
+  channelChats[channel].push(message);
   
-  appendMessage(message);
+  if (activeChatType === 'channel' && channel === activeChatTarget) {
+    appendMessage(message);
+  }
+});
+
+// Receive Private Message
+socket.on('receive-private-message', ({ senderId, senderName, senderColor, text, type, timestamp }) => {
+  const messageData = {
+    id: `${senderId}-${Date.now()}`,
+    senderId: senderId,
+    senderName: senderName,
+    senderColor: senderColor,
+    text: text,
+    type: type,
+    timestamp: timestamp
+  };
+  
+  privateChats[senderId] = privateChats[senderId] || [];
+  privateChats[senderId].push(messageData);
+  
+  if (activeChatType === 'dm' && activeChatTarget === senderId) {
+    appendMessage(messageData);
+  } else {
+    // Show unread indicator in online list
+    const memberItem = document.querySelector(`.member-item[data-socket-id="${senderId}"]`);
+    if (memberItem) {
+      memberItem.classList.add('unread');
+    }
+  }
 });
 
 function appendMessage(msg) {
@@ -200,6 +275,16 @@ function appendMessage(msg) {
     html = `<div class="system-msg-card">${msg.text}</div>`;
   } else {
     const initial = msg.senderName.charAt(0).toUpperCase();
+    let bodyHtml = '';
+    
+    if (msg.type === 'image') {
+      bodyHtml = `<img src="${msg.text}" class="chat-shared-image" alt="Shared Image">`;
+    } else if (msg.type === 'audio') {
+      bodyHtml = `<audio src="${msg.text}" controls class="chat-shared-audio"></audio>`;
+    } else {
+      bodyHtml = `<p class="msg-text">${escapeHTML(msg.text)}</p>`;
+    }
+    
     html = `
       <div class="message-card">
         <div class="msg-avatar" style="background-color: ${msg.senderColor}">${initial}</div>
@@ -208,7 +293,7 @@ function appendMessage(msg) {
             <span class="msg-sender" style="color: ${msg.senderColor}">${msg.senderName}</span>
             <span class="msg-timestamp">${msg.timestamp}</span>
           </div>
-          <p class="msg-text">${escapeHTML(msg.text)}</p>
+          ${bodyHtml}
         </div>
       </div>
     `;
@@ -562,8 +647,93 @@ dom.btnToggleMic.addEventListener('click', toggleMic);
 dom.btnLargeMic.addEventListener('click', toggleMic);
 dom.btnToggleCam.addEventListener('click', toggleCam);
 dom.btnLargeCam.addEventListener('click', toggleCam);
+dom.btnToggleScreen.addEventListener('click', toggleScreenShare);
+dom.btnLargeScreen.addEventListener('click', toggleScreenShare);
 dom.btnLeaveVc.addEventListener('click', leaveVoiceChannel);
 dom.btnLargeLeave.addEventListener('click', leaveVoiceChannel);
+
+// File attachment trigger & change handlers
+dom.fileTrigger.addEventListener('click', () => {
+  dom.fileInput.click();
+});
+
+dom.fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  
+  if (file.size > 3 * 1024 * 1024) { // 3MB limit
+    alert('File size too large. Please select a file under 3MB.');
+    e.target.value = '';
+    return;
+  }
+  
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    const base64Data = event.target.result;
+    const isImage = file.type.startsWith('image/');
+    const isAudio = file.type.startsWith('audio/');
+    const type = isImage ? 'image' : (isAudio ? 'audio' : null);
+    
+    if (!type) {
+      alert('Only images and audio files are supported for sharing.');
+      return;
+    }
+    
+    if (activeChatType === 'dm') {
+      sendPrivateMessage(base64Data, type);
+    } else {
+      socket.emit('send-message', { text: base64Data, channel: currentTC, type: type });
+    }
+    e.target.value = ''; // Reset input
+  };
+  reader.readAsDataURL(file);
+});
+
+// Direct message trigger click listener (event delegation)
+dom.onlineMembersList.addEventListener('click', (e) => {
+  const item = e.target.closest('.member-item');
+  if (!item) return;
+  
+  const targetSocketId = item.getAttribute('data-socket-id');
+  const targetUsername = item.getAttribute('data-username');
+  
+  if (targetSocketId === localUserId) {
+    return; // Can't DM yourself
+  }
+  
+  openPrivateChat(targetSocketId, targetUsername);
+});
+
+function openPrivateChat(targetSocketId, targetUsername) {
+  activeChatType = 'dm';
+  activeChatTarget = targetSocketId;
+  
+  // UI active class swap for members list
+  document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.member-item').forEach(el => {
+    if (el.getAttribute('data-socket-id') === targetSocketId) {
+      el.classList.add('active');
+      el.classList.remove('unread'); // Clear unread dot
+    } else {
+      el.classList.remove('active');
+    }
+  });
+  
+  // Update headers
+  dom.activeChannelName.textContent = `@${targetUsername}`;
+  dom.activeChannelDesc.textContent = `Private conversation with @${targetUsername}`;
+  dom.welcomeChannelName.textContent = `@${targetUsername}`;
+  dom.welcomeChannelDescSpan.textContent = `This is the start of your direct message history with @${targetUsername}.`;
+  
+  // Clear feed and load history
+  dom.messageFeed.innerHTML = '';
+  dom.messageInput.placeholder = `Message @${targetUsername}...`;
+  
+  const history = privateChats[targetSocketId] || [];
+  history.forEach(msg => {
+    appendMessage(msg);
+  });
+}
 
 function toggleMic() {
   micActive = !micActive;
@@ -593,9 +763,94 @@ function toggleCam() {
     });
   }
   
+  // If screen sharing is active, stop it first to prevent webcam conflicts
+  if (screenActive) {
+    stopScreenShare();
+  }
+  
   socket.emit('toggle-media-status', { micActive, camActive });
   updateMediaButtonStates();
   toggleLocalVideoUI();
+}
+
+async function toggleScreenShare() {
+  if (!screenActive) {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert('Screen sharing is not supported in this browser or requires a secure context (HTTPS/localhost).');
+        return;
+      }
+      
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenActive = true;
+      
+      const screenTrack = screenStream.getVideoTracks()[0];
+      screenTrack.onended = () => {
+        stopScreenShare();
+      };
+      
+      // Replace camera video track in all active RTCPeerConnections
+      Object.keys(peers).forEach(socketId => {
+        const pc = peers[socketId];
+        const senders = pc.getSenders();
+        const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(screenTrack);
+        }
+      });
+      
+      // Update local video element view
+      const localVideo = document.getElementById('video-local');
+      if (localVideo) {
+        localVideo.srcObject = screenStream;
+        const localPlaceholder = document.getElementById('placeholder-local');
+        if (localPlaceholder) localPlaceholder.classList.add('hidden');
+      }
+      
+      updateScreenButtonStates();
+      
+      // Notify server screen video is now sending (similar to camera active)
+      socket.emit('toggle-media-status', { micActive, camActive: true });
+    } catch (err) {
+      console.error('Failed to acquire screen capture:', err);
+      screenActive = false;
+    }
+  } else {
+    stopScreenShare();
+  }
+}
+
+function stopScreenShare() {
+  if (!screenActive) return;
+  
+  if (screenStream) {
+    screenStream.getTracks().forEach(track => track.stop());
+    screenStream = null;
+  }
+  
+  screenActive = false;
+  
+  // Revert video track in all active RTCPeerConnections back to camera stream (or null)
+  const cameraTrack = (localStream && camActive) ? localStream.getVideoTracks()[0] : null;
+  
+  Object.keys(peers).forEach(socketId => {
+    const pc = peers[socketId];
+    const senders = pc.getSenders();
+    const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+    if (videoSender) {
+      videoSender.replaceTrack(cameraTrack);
+    }
+  });
+  
+  // Restore local video element view
+  const localVideo = document.getElementById('video-local');
+  if (localVideo) {
+    localVideo.srcObject = localStream;
+    toggleLocalVideoUI();
+  }
+  
+  updateScreenButtonStates();
+  socket.emit('toggle-media-status', { micActive, camActive });
 }
 
 function toggleLocalVideoUI() {
@@ -637,6 +892,22 @@ function updateMediaButtonStates() {
   }
 }
 
+function updateScreenButtonStates() {
+  if (screenActive) {
+    dom.btnToggleScreen.classList.add('active');
+    dom.btnToggleScreen.querySelector('.icon-screen-on').classList.remove('hidden');
+    dom.btnToggleScreen.querySelector('.icon-screen-off').classList.add('hidden');
+    
+    dom.btnLargeScreen.classList.add('active');
+  } else {
+    dom.btnToggleScreen.classList.remove('active');
+    dom.btnToggleScreen.querySelector('.icon-screen-on').classList.add('hidden');
+    dom.btnToggleScreen.querySelector('.icon-screen-off').classList.remove('hidden');
+    
+    dom.btnLargeScreen.classList.remove('active');
+  }
+}
+
 // Receive other user media toggles
 socket.on('peer-media-status-updated', ({ socketId, micActive, camActive }) => {
   const placeholder = document.getElementById(`placeholder-${socketId}`);
@@ -657,7 +928,8 @@ socket.on('peer-media-status-updated', ({ socketId, micActive, camActive }) => {
 function updateGlobalUsersList(usersMap) {
   dom.onlineMembersList.innerHTML = '';
   
-  // Clear any existing VC user panels
+  // Clear any existing VC user panels from the sidebar to prevent duplication
+  document.querySelectorAll('.vc-member-item').forEach(el => el.remove());
   dom.vcUsersList.innerHTML = '';
   
   let count = 0;
@@ -670,9 +942,9 @@ function updateGlobalUsersList(usersMap) {
     const user = usersMap[id];
     const initial = user.username.charAt(0).toUpperCase();
     
-    // Add to General Online member panel
+    // Add to General Online member panel with data attributes for DM listeners
     const memberHtml = `
-      <li class="member-item">
+      <li class="member-item" data-socket-id="${id}" data-username="${user.username}">
         <div class="member-avatar-wrapper">
           <div class="member-avatar" style="background-color: ${user.color}">${initial}</div>
           <span class="online-indicator"></span>
@@ -681,6 +953,12 @@ function updateGlobalUsersList(usersMap) {
       </li>
     `;
     dom.onlineMembersList.insertAdjacentHTML('beforeend', memberHtml);
+    
+    // Maintain active highlight state if currently in a DM with them
+    if (activeChatType === 'dm' && activeChatTarget === id) {
+      const activeItem = document.querySelector(`.member-item[data-socket-id="${id}"]`);
+      if (activeItem) activeItem.classList.add('active');
+    }
     
     // Check if user is inside a Voice Channel
     if (user.currentVC) {
@@ -729,7 +1007,6 @@ function updateGlobalUsersList(usersMap) {
 
 // Receive continuous updates of server state
 socket.on('global-user-state-update', () => {
-  // Rather than managing incremental user lists, fetch absolute list from server
   socket.emit('request-user-list');
 });
 
@@ -740,6 +1017,18 @@ socket.on('user-status-changed', () => {
 socket.on('user-disconnected', ({ socketId }) => {
   // If the disconnected user was in a call with us, close connection
   closePeerConnection(socketId);
+  
+  // Clean up direct message local storage
+  if (privateChats[socketId]) {
+    delete privateChats[socketId];
+  }
+  
+  // If currently chatting privately with them, kick back to general
+  if (activeChatType === 'dm' && activeChatTarget === socketId) {
+    alert('The user you were chatting with has left. Direct chat history has been cleared.');
+    switchTextChannel('general');
+  }
+  
   socket.emit('request-user-list');
 });
 

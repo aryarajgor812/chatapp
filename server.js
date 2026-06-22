@@ -6,6 +6,7 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
+  maxHttpBufferSize: 1e7, // 10MB payload size limit
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
@@ -77,9 +78,12 @@ io.on('connection', (socket) => {
     console.log(`${user.username} switched to text channel: ${channelId}`);
   });
 
-  socket.on('send-message', ({ text, channel }) => {
+  socket.on('send-message', ({ text, channel, type }) => {
     const user = users[socket.id];
     if (!user) return;
+
+    const msgType = type || 'text';
+    const msgText = msgType === 'text' ? text.substring(0, 1000) : text;
 
     const targetChannel = channel || DEFAULT_TEXT_CHANNEL;
     const messageData = {
@@ -87,13 +91,31 @@ io.on('connection', (socket) => {
       senderId: socket.id,
       senderName: user.username,
       senderColor: user.color,
-      text: text.substring(0, 1000), // Limit message size
+      text: msgText,
+      type: msgType,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
     io.to(targetChannel).emit('receive-message', {
       channel: targetChannel,
       message: messageData
+    });
+  });
+
+  socket.on('send-private-message', ({ recipientId, text, type }) => {
+    const user = users[socket.id];
+    if (!user) return;
+
+    const msgType = type || 'text';
+    const msgText = msgType === 'text' ? text.substring(0, 1000) : text;
+
+    io.to(recipientId).emit('receive-private-message', {
+      senderId: socket.id,
+      senderName: user.username,
+      senderColor: user.color,
+      text: msgText,
+      type: msgType,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     });
   });
 
@@ -190,6 +212,7 @@ io.on('connection', (socket) => {
     
     io.to(targetSocketId).emit('webrtc-offer', {
       senderSocketId: socket.id,
+      senderUser: sender,
       offer: offer
     });
   });
